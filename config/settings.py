@@ -48,6 +48,12 @@ class Settings:
     poly_private_key: str = field(
         default_factory=lambda: os.environ.get("POLY_PRIVATE_KEY", "")
     )
+    poly_relayer_api_key: str = field(
+        default_factory=lambda: os.environ.get("POLY_RELAYER_API_KEY", "")
+    )
+    poly_address: str = field(
+        default_factory=lambda: os.environ.get("POLY_ADDRESS", "")
+    )
 
     @property
     def active_openai_key(self) -> str:
