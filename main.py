@@ -188,7 +188,10 @@ class TradingOrchestrator:
             max_position_usdc=settings.max_position_size_usdc,
             dry_run=dry_run,
         )
-        self.analyst = ClaudeAnalyst(api_key=settings.anthropic_api_key)
+        self.analyst = ClaudeAnalyst(
+            anthropic_api_key=settings.anthropic_api_key,
+            openai_api_keys=settings.openai_api_keys,
+        )
         self.data_agent = DataAgent(data_dir=settings.data_dir)
 
         logger.info(

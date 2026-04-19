@@ -38,14 +38,10 @@ class AIAnalyst:
     OPENAI_MODEL = "gpt-4o-mini"
 
     def __init__(self, anthropic_api_key: str = "", openai_api_keys: list[str] | None = None) -> None:
-        self._anthropic_key = anthropic_api_key
         self._openai_keys: list[str] = list(openai_api_keys or [])
         self._openai_key_index = 0
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-        # Lazy-init clients
         self._anthropic_client = None
-        self._openai_client = None
 
         if anthropic_api_key:
             try:

@@ -19,6 +19,7 @@ PYTHON="$VENV_DIR/bin/python"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+export PIP_USER=false
 
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}  Polymarket AI Trader — NYC Tailblazers${NC}"
@@ -33,8 +34,8 @@ fi
 
 # ── Install / upgrade dependencies ───────────────────────────────────────────
 echo -e "${YELLOW}Checking dependencies...${NC}"
-"$PYTHON" -m pip install --quiet --upgrade pip
-"$PYTHON" -m pip install --quiet -r requirements.txt
+PIP_USER=false "$PYTHON" -m pip install --quiet --upgrade pip
+PIP_USER=false "$PYTHON" -m pip install --quiet -r requirements.txt
 echo -e "${GREEN}✓ Dependencies ready${NC}"
 
 # ── Check .env exists ─────────────────────────────────────────────────────────
