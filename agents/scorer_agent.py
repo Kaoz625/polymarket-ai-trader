@@ -233,7 +233,41 @@ class ScorerAgent:
 
     # ── Scoring ────────────────────────────────────────────────────────────
 
-    def score_market(self, market: Market) -> ScoredMarket:
+    def score_market(self, market: Market) -> ScoredMarket | None:
+        """
+        Score a market 0-100.  Returns None if the market fails hard-kill filters.
+
+        Hard-kill filters (article spec):
+          - volume_24h < 50,000 USDC  → slippage kills edge
+          - hours_to_resolve < 4      → too close to resolution
+          - hours_to_resolve > 168    → too slow (1-week max)
+        """
+        hours_to_resolve = market.time_to_resolution_days * 24
+
+        # Hard-kill: insufficient volume
+        if market.volume_24h < 50_000:
+            logger.debug(
+                "HARD-KILL volume: %s  vol=%.0f", market.question[:50], market.volume_24h
+            )
+            return None
+
+        # Hard-kill: resolves too soon
+        if market.resolution_ts > 0 and hours_to_resolve < 4:
+            logger.debug(
+                "HARD-KILL too_soon: %s  h=%.1f", market.question[:50], hours_to_resolve
+            )
+            return None
+
+        # Hard-kill: resolves too far away (> 1 week)
+        if market.resolution_ts > 0 and hours_to_resolve > 168:
+            logger.debug(
+                "HARD-KILL too_far: %s  h=%.1f", market.question[:50], hours_to_resolve
+            )
+            return None
+
+        return self._score_market_internal(market)
+
+    def _score_market_internal(self, market: Market) -> ScoredMarket:
         """
         Score a market 0-100 across five dimensions.
 
@@ -294,16 +328,43 @@ class ScorerAgent:
         total = sum(breakdown.values())
         return ScoredMarket(market=market, score=round(total, 2), score_breakdown=breakdown)
 
-    async def get_top_markets(self, n: int = 20, min_score: float = 70.0) -> list[ScoredMarket]:
+    async def get_top_markets(
+        self,
+        n: int = 20,
+        min_score: float = 70.0,
+        ai_estimates: dict[str, float] | None = None,
+        min_edge_gap: float = 0.07,
+    ) -> list[ScoredMarket]:
         """
         Fetch all active markets, score them, return the top-n above min_score.
+
+        Hard-kill filters are applied inside score_market() (returns None on kill).
+        Optional edge gap filter: skip markets where abs(ai_estimate - yes_price) < min_edge_gap.
         """
         markets = await self.fetch_markets(limit=500)
-        scored = [self.score_market(m) for m in markets]
+        raw_scored = [self.score_market(m) for m in markets]
+        # Filter out hard-killed markets (score_market returns None)
+        scored: list[ScoredMarket] = [s for s in raw_scored if s is not None]
+
+        # Optional per-market edge gap filter
+        if ai_estimates:
+            filtered: list[ScoredMarket] = []
+            for s in scored:
+                est = ai_estimates.get(s.market.condition_id)
+                if est is not None:
+                    gap = abs(est - s.market.yes_price)
+                    if gap < min_edge_gap:
+                        logger.debug(
+                            "EDGE-KILL: %s gap=%.3f", s.market.question[:50], gap
+                        )
+                        continue
+                filtered.append(s)
+            scored = filtered
+
         scored.sort(key=lambda s: s.score, reverse=True)
         top = [s for s in scored if s.score >= min_score]
         logger.info(
-            "Scored %d markets; %d above %.0f (returning top %d)",
-            len(scored), len(top), min_score, n,
+            "Scored %d markets (%d hard-killed); %d above %.0f (returning top %d)",
+            len(scored), len(markets) - len(scored), len(top), min_score, n,
         )
         return top[:n]

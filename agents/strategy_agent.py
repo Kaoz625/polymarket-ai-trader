@@ -196,9 +196,11 @@ class StrategyAgent:
         history = self._volume_history.setdefault(market_id, [])
         now = time.time()
         history.append((now, current_vol))
-        # Keep last 24h of observations
+        # Keep last 24h of observations — trim BEFORE computing baseline (Bug 2 fix)
         cutoff = now - 86400
-        self._volume_history[market_id] = [(t, v) for t, v in history if t >= cutoff]
+        trimmed = [(t, v) for t, v in history if t >= cutoff]
+        self._volume_history[market_id] = trimmed
+        history = trimmed  # use trimmed list for all subsequent calculations
 
         if len(history) < 3:
             return False, 1.0
@@ -290,6 +292,32 @@ class StrategyAgent:
 
     # ── Exit logic ─────────────────────────────────────────────────────────
 
+    async def refresh_position_price(self, position: Position) -> None:
+        """
+        Fetch live price from CLOB and update position.current_price.
+        Called before every exit check to avoid stale-price decisions (Bug 1 fix).
+        """
+        stats = await self._fetch_market_stats(position.market_id)
+        if not stats:
+            return
+        # CLOB returns tokens list or direct price fields
+        tokens = stats.get("tokens", [])
+        if tokens:
+            for tok in tokens:
+                name = str(tok.get("outcome", tok.get("name", ""))).upper()
+                price = float(tok.get("price", tok.get("lastTradePrice", 0)))
+                if name in ("YES", "TRUE", "1") and position.side == "YES":
+                    position.current_price = price
+                    return
+                if name in ("NO", "FALSE", "0") and position.side == "NO":
+                    position.current_price = price
+                    return
+        # Fallback: direct price field
+        price = float(stats.get("lastTradePrice", stats.get("price", 0)))
+        if price > 0:
+            position.current_price = price
+        self.update_position_price(position.market_id, position.current_price)
+
     async def should_exit(self, position: Position) -> tuple[bool, str]:
         """
         Returns (should_exit, reason).
@@ -298,6 +326,7 @@ class StrategyAgent:
           1. Loss-cut: pnl_pct <= -loss_cut
           2. Target: captured >= exit_threshold of expected move
           3. Volume spike: current volume >= volume_spike_multiplier × baseline
+          4. Stale thesis: held > 24h and price moved < 2% (Bug 3 fix)
         """
         # Loss cut
         if position.pnl_pct <= -self.loss_cut:
@@ -318,6 +347,11 @@ class StrategyAgent:
         if spike:
             return True, f"volume_spike ({ratio:.1f}x)"
 
+        # Stale thesis: position held > 24h with < 2% price movement (Bug 3 fix)
+        hours_since_entry = (time.time() - position.entry_ts) / 3600
+        if hours_since_entry > 24 and abs(position.current_price - position.entry_price) < 0.02:
+            return True, "stale_thesis_24h"
+
         return False, ""
 
     # ── Position management ────────────────────────────────────────────────
@@ -325,6 +359,15 @@ class StrategyAgent:
     def open_position(self, signal: TradeSignal, filled_price: float, size_usdc: float) -> Position:
         """Record a newly filled position."""
         import uuid
+        # Capture current volume baseline at entry time (Bug 2 fix: set volume_baseline)
+        history = self._volume_history.get(signal.market_id, [])
+        if len(history) >= 2:
+            volume_baseline = sum(v for _, v in history[:-1]) / (len(history) - 1)
+        elif history:
+            volume_baseline = history[-1][1]
+        else:
+            volume_baseline = 0.0
+
         pos = Position(
             position_id=str(uuid.uuid4()),
             market_id=signal.market_id,
@@ -335,13 +378,14 @@ class StrategyAgent:
             size_usdc=size_usdc,
             target_price=signal.target_price,
             stop_price=signal.stop_price,
+            volume_baseline=volume_baseline,
         )
         self._open_positions[signal.market_id] = pos
         self._save_position(pos)
         logger.info(
-            "Opened position: %s %s @ %.4f target=%.4f stop=%.4f",
+            "Opened position: %s %s @ %.4f target=%.4f stop=%.4f vol_baseline=%.0f",
             signal.side, signal.question[:50], filled_price,
-            signal.target_price, signal.stop_price,
+            signal.target_price, signal.stop_price, volume_baseline,
         )
         return pos
 

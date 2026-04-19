@@ -8,6 +8,7 @@
 #    ./run.sh --wallets   → analyze poly_data wallet patterns
 #    ./run.sh --backtest  → run historical backtest
 #    ./run.sh --install   → install/update dependencies only
+#    ./run.sh --startup   → run startup.sh (scanner + 3 background agents)
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
@@ -52,6 +53,10 @@ case "$ARG" in
     --install)
         echo -e "${GREEN}✓ Install complete.${NC}"
         exit 0
+        ;;
+    --startup)
+        echo -e "${YELLOW}Launching startup pipeline (scanner + 3 background agents)...${NC}"
+        bash "$SCRIPT_DIR/startup.sh"
         ;;
     --backtest)
         echo -e "${YELLOW}Running backtest...${NC}"

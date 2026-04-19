@@ -303,6 +303,117 @@ class ExecutorAgent:
                 ),
             )
 
+    # ── Consensus voting ───────────────────────────────────────────────────
+
+    def consensus_execute(
+        self,
+        agents: list[Any],
+        market: Any,
+        wallet_balance: float,
+        signal: Any | None = None,
+    ) -> "OrderResult | None":
+        """
+        Collect synchronous evaluate() votes from a list of agents and execute
+        with Kelly sizing based on consensus strength.
+
+        Voting rules:
+            2+ agents return action="BUY" → full Kelly position
+            1 agent returns action="BUY"  → half Kelly position
+            0 agents return action="BUY"  → no trade
+
+        Args:
+            agents:         List of agent objects with an evaluate(market) method.
+                            evaluate() must return {"action": str, "confidence": float, ...}.
+                            Async agents are NOT supported here — use executor_process.py
+                            for async consensus.
+            market:         Market object (must have .yes_price and .condition_id).
+            wallet_balance: Current USDC balance for Kelly sizing.
+            signal:         Pre-built signal object.  If None, a minimal signal is
+                            constructed from market attributes.
+
+        Returns:
+            OrderResult if an order was placed, None otherwise.
+        """
+        from agents.kelly import kelly_size  # local import avoids circular deps
+
+        # Minimum volume filter
+        volume_24h = float(getattr(market, "volume_24h", 0))
+        if volume_24h < 50_000:
+            logger.info(
+                "consensus_execute: SKIP volume %.0f < 50000 for %s",
+                volume_24h, getattr(market, "condition_id", "?")[:20],
+            )
+            return None
+
+        # Collect votes
+        buy_votes = 0
+        total_confidence = 0.0
+        for agent in agents:
+            try:
+                result = agent.evaluate(market)
+                # Handle coroutines returned by async agents (best-effort)
+                import asyncio
+                import inspect
+                if inspect.iscoroutine(result):
+                    try:
+                        result = asyncio.get_event_loop().run_until_complete(result)
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        result = loop.run_until_complete(result)
+                        loop.close()
+                action = result.get("action", "PASS")
+                conf = float(result.get("confidence", 0.0))
+                if action == "BUY":
+                    buy_votes += 1
+                    total_confidence += conf
+            except Exception as exc:
+                logger.warning("Agent %s evaluate failed: %s", type(agent).__name__, exc)
+
+        logger.info(
+            "consensus_execute: %d/%d BUY votes for %s",
+            buy_votes, len(agents), getattr(market, "condition_id", "?")[:20],
+        )
+
+        if buy_votes == 0:
+            return None
+
+        # Build a minimal signal if none provided
+        if signal is None:
+            yes_price = float(getattr(market, "yes_price", 0.5))
+            loss_cut = 0.12
+
+            class _MinimalSignal:
+                market_id = getattr(market, "condition_id", "")
+                question = getattr(market, "question", "")
+                side = "YES"
+                entry_price = yes_price
+                target_price = min(yes_price + (1.0 - yes_price) * 0.86, 0.98)
+                stop_price = yes_price * (1 - loss_cut)
+
+            signal = _MinimalSignal()
+
+        # Kelly sizing
+        avg_confidence = total_confidence / max(buy_votes, 1)
+        full_kelly = kelly_size(
+            p_win=avg_confidence,
+            market_price=signal.entry_price,
+            bankroll=wallet_balance,
+            max_fraction=0.25,
+        )
+
+        if buy_votes >= 2:
+            size_usdc = full_kelly
+        else:
+            size_usdc = full_kelly * 0.5
+
+        size_usdc = min(size_usdc, self.max_position_usdc)
+
+        if size_usdc <= 0:
+            logger.info("consensus_execute: Kelly returned 0, skipping")
+            return None
+
+        return self.place_order(signal, size_usdc=size_usdc)
+
     # ── Position closing ───────────────────────────────────────────────────
 
     def close_position(
