@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+*.sqlite
+*.db
+logs/
+data/wallet_analysis.json
+data/backtest_results.json
+.DS_Store
+venv/
+.venv/
+dist/
+build/
+*.egg-info/
