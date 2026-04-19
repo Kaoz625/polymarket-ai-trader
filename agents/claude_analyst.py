@@ -1,7 +1,7 @@
 """
-ClaudeAnalyst — uses the Anthropic API (claude-sonnet-4-6) to provide
-qualitative market analysis.  Responses are cached for 5 minutes to
-avoid redundant API calls.
+AIAnalyst — uses Anthropic (claude-sonnet-4-6) with automatic OpenAI fallback.
+Multiple OpenAI keys are rotated on rate-limit or auth errors.
+Responses are cached for 5 minutes to avoid redundant API calls.
 """
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ import json
 import logging
 import time
 from typing import Any
-
-import anthropic
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +29,34 @@ When analysing a market you must output a JSON object with exactly these keys:
 Output ONLY valid JSON. No preamble, no markdown fences."""
 
 
-class ClaudeAnalyst:
+class AIAnalyst:
     """
-    Thin wrapper around the Anthropic Messages API for market analysis.
-    Caches responses keyed by a hash of the market data.
+    Market analyst that tries Anthropic first, then rotates through OpenAI keys.
     """
 
-    MODEL = "claude-sonnet-4-6"
+    ANTHROPIC_MODEL = "claude-sonnet-4-6"
+    OPENAI_MODEL = "gpt-4o-mini"
 
-    def __init__(self, api_key: str) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self, anthropic_api_key: str = "", openai_api_keys: list[str] | None = None) -> None:
+        self._anthropic_key = anthropic_api_key
+        self._openai_keys: list[str] = list(openai_api_keys or [])
+        self._openai_key_index = 0
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+        # Lazy-init clients
+        self._anthropic_client = None
+        self._openai_client = None
+
+        if anthropic_api_key:
+            try:
+                import anthropic
+                self._anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
+                logger.info("Anthropic client initialized (claude-sonnet-4-6)")
+            except Exception as e:
+                logger.warning("Anthropic init failed: %s", e)
+
+        if self._openai_keys:
+            logger.info("OpenAI fallback ready with %d key(s)", len(self._openai_keys))
 
     # ── Cache helpers ──────────────────────────────────────────────────────
 
@@ -61,30 +76,71 @@ class ClaudeAnalyst:
     def _set_cache(self, key: str, result: dict[str, Any]) -> None:
         self._cache[key] = (time.time(), result)
 
-    # ── API call ───────────────────────────────────────────────────────────
+    # ── Provider calls ─────────────────────────────────────────────────────
 
-    def _call_claude(self, user_message: str) -> dict[str, Any]:
-        """Send a message to claude-sonnet-4-6 and parse JSON response."""
+    def _call_anthropic(self, user_message: str) -> dict[str, Any] | None:
+        if not self._anthropic_client:
+            return None
         try:
-            response = self._client.messages.create(
-                model=self.MODEL,
+            import anthropic
+            response = self._anthropic_client.messages.create(
+                model=self.ANTHROPIC_MODEL,
                 max_tokens=512,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_message}],
             )
             raw = response.content[0].text.strip()
-            # Strip markdown fences if the model adds them
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            logger.warning("Claude returned non-JSON: %s", exc)
-            return self._default_analysis()
-        except anthropic.APIError as exc:
-            logger.error("Anthropic API error: %s", exc)
-            return self._default_analysis()
+            return self._parse_json(raw)
+        except Exception as exc:
+            logger.warning("Anthropic call failed: %s", exc)
+            return None
+
+    def _call_openai(self, user_message: str) -> dict[str, Any] | None:
+        if not self._openai_keys:
+            return None
+        # Try each key in rotation
+        for attempt in range(len(self._openai_keys)):
+            key = self._openai_keys[self._openai_key_index % len(self._openai_keys)]
+            try:
+                import openai
+                client = openai.OpenAI(api_key=key)
+                response = client.chat.completions.create(
+                    model=self.OPENAI_MODEL,
+                    max_tokens=512,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                )
+                raw = response.choices[0].message.content.strip()
+                logger.debug("OpenAI key #%d succeeded", self._openai_key_index % len(self._openai_keys))
+                return self._parse_json(raw)
+            except Exception as exc:
+                logger.warning(
+                    "OpenAI key #%d failed (%s), rotating...",
+                    self._openai_key_index % len(self._openai_keys), exc
+                )
+                self._openai_key_index += 1
+        logger.error("All OpenAI keys exhausted")
+        return None
+
+    def _call_ai(self, user_message: str) -> dict[str, Any]:
+        """Try Anthropic first, fall back to OpenAI key rotation."""
+        result = self._call_anthropic(user_message)
+        if result is not None:
+            return result
+        result = self._call_openai(user_message)
+        if result is not None:
+            return result
+        return self._default_analysis()
+
+    @staticmethod
+    def _parse_json(raw: str) -> dict[str, Any]:
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw.strip())
 
     @staticmethod
     def _default_analysis() -> dict[str, Any]:
@@ -92,27 +148,14 @@ class ClaudeAnalyst:
             "sentiment": "neutral",
             "confidence": 0.5,
             "fair_value_yes": 0.5,
-            "edge_description": "Insufficient information to assess edge.",
-            "key_risks": ["API unavailable"],
+            "edge_description": "No AI provider available.",
+            "key_risks": ["All AI providers unavailable"],
             "recommendation": "pass",
         }
 
     # ── Public API ─────────────────────────────────────────────────────────
 
     def analyze_market(self, market_data: dict[str, Any]) -> dict[str, Any]:
-        """
-        Analyse a single market.
-
-        market_data should contain:
-            question       : str
-            yes_price      : float
-            no_price       : float
-            volume_24h     : float
-            liquidity      : float
-            score          : float (from ScorerAgent)
-            days_to_resolve: float (optional)
-            recent_news    : str (optional — any context the caller has)
-        """
         key = self._cache_key(market_data)
         cached = self._get_cached(key)
         if cached:
@@ -141,7 +184,7 @@ class ClaudeAnalyst:
             f"Output your analysis as JSON."
         )
 
-        result = self._call_claude(user_message)
+        result = self._call_ai(user_message)
         self._set_cache(key, result)
         logger.info(
             "Market analysis: %s → %s (conf=%.2f, rec=%s)",
@@ -153,10 +196,6 @@ class ClaudeAnalyst:
         return result
 
     def summarize_performance(self, trades: list[dict[str, Any]]) -> dict[str, Any]:
-        """
-        Ask Claude to summarise recent trading performance and suggest
-        improvements.  Returns a dict with keys: summary, suggestions.
-        """
         if not trades:
             return {"summary": "No trades to summarise.", "suggestions": []}
 
@@ -186,8 +225,7 @@ class ClaudeAnalyst:
         )
 
         try:
-            result = self._call_claude(user_message)
-            # Normalise keys in case Claude drifts
+            result = self._call_ai(user_message)
             if "summary" not in result:
                 result["summary"] = str(result)
             if "suggestions" not in result:
@@ -201,3 +239,7 @@ class ClaudeAnalyst:
 
         self._set_cache(cache_key, result)
         return result
+
+
+# Backwards-compat alias
+ClaudeAnalyst = AIAnalyst

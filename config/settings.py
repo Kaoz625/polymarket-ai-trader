@@ -15,12 +15,27 @@ PROJECT_ROOT = Path(__file__).parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+def _load_openai_keys() -> list[str]:
+    """Load all OPENAI_API_KEY_N env vars (N=1..20) plus OPENAI_API_KEY."""
+    keys: list[str] = []
+    base = os.environ.get("OPENAI_API_KEY", "")
+    if base:
+        keys.append(base)
+    for i in range(1, 21):
+        k = os.environ.get(f"OPENAI_API_KEY_{i}", "")
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
 @dataclass
 class Settings:
     # ── API credentials ────────────────────────────────────────────────────
     anthropic_api_key: str = field(
         default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", "")
     )
+    # Multiple OpenAI keys — rotated on rate-limit / error
+    openai_api_keys: list[str] = field(default_factory=_load_openai_keys)
     poly_api_key: str = field(
         default_factory=lambda: os.environ.get("POLY_API_KEY", "")
     )
@@ -33,6 +48,11 @@ class Settings:
     poly_private_key: str = field(
         default_factory=lambda: os.environ.get("POLY_PRIVATE_KEY", "")
     )
+
+    @property
+    def active_openai_key(self) -> str:
+        """Return first available OpenAI key."""
+        return self.openai_api_keys[0] if self.openai_api_keys else ""
 
     # ── Exit / risk thresholds ─────────────────────────────────────────────
     # Exit when we have captured this fraction of the expected move
@@ -76,8 +96,8 @@ class Settings:
     def validate(self) -> None:
         """Raise if required credentials are missing."""
         missing = []
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
+        if not self.anthropic_api_key and not self.openai_api_keys:
+            missing.append("ANTHROPIC_API_KEY or OPENAI_API_KEY_1")
         if not self.poly_api_key:
             missing.append("POLY_API_KEY")
         if not self.poly_private_key:
