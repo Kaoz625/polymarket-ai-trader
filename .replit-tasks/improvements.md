@@ -1,34 +1,60 @@
-# Replit Agent Task Spec
+# Replit Agent Task: polymarket-ai-trader
 
-## Instructions for Replit Agent
-You are building/improving this project. Read this file carefully before touching any code.
-Commit all changes with prefix "replit: " and push to main when done.
+## Goal
+Extend the existing autonomous Polymarket trading bot with Fincept Terminal integration for Bloomberg-level financial data and add a web-based prediction dashboard so Markus can monitor market signals and bot decisions from a browser.
 
-## Stack Rules (non-negotiable)
-- Static → Cloudflare Pages (never Vercel)
-- DB → Supabase self-hosted Docker (never cloud Supabase)
-- Auth → NextAuth.js (free, not Auth0/Clerk)
-- AI → Claude Sonnet 4.6 via Anthropic API (model: claude-sonnet-4-6)
-- Payments (adult) → CCBill or Segpay only
+## Tasks
+1. **Fincept Terminal integration** (`fincept_client.py`): wrap the Fincept Terminal API (https://fincept.chart.tools — read `FINCEPT_API_KEY` from env); implement:
+   - `get_market_news(topic: str, limit=20)` → returns recent news articles with headline, source, sentiment score, published_at
+   - `get_macro_indicators(indicators: list[str])` → returns current values for GDP growth, CPI, Fed funds rate, VIX, DXY, etc.
+   - `get_sector_sentiment(sector: str)` → returns bullish/bearish sentiment score for a market sector
+   - `search_events(query: str)` → searches for prediction-market-relevant events (elections, sports, economic releases)
+   - Cache all responses in SQLite for 15 minutes to avoid rate limits
+2. **Enhanced market scoring** (update `agents/market_scorer.py` or equivalent): add Fincept data as new scoring signals:
+   - News sentiment score (average of top 5 articles for the market topic): weight 15%
+   - Macro risk score (VIX level, DXY trend): weight 10%
+   - Existing Polymarket signals keep their original weights, scaled down proportionally
+   - Document the new scoring formula in a docstring
+3. **Prediction dashboard** (`dashboard/`): a web-based FastAPI app (or Flask if FastAPI isn't already in use) that serves:
+   - `GET /` → dashboard HTML page (single-page, vanilla JS polling every 30s)
+   - `GET /api/markets` → JSON: top 10 scored markets with score breakdown, Fincept news snippets, Claude recommendation
+   - `GET /api/positions` → JSON: current open positions with entry price, current price, P&L, exit targets
+   - `GET /api/signals` → JSON: last 20 generated trade signals with timestamp, market, direction, confidence
+   - `GET /api/news` → JSON: latest Fincept news relevant to open positions
+4. **Dashboard UI** (`dashboard/templates/index.html`): dark terminal aesthetic matching existing rich dashboard; sections:
+   - **Header**: "Polymarket AI Trader" + live clock + "LIVE" status badge
+   - **Positions table**: sortable by P&L; color-coded (green=profit, red=loss); shows Claude recommendation for each
+   - **Top Markets table**: score bar chart (CSS width %), news sentiment chip, "Fincept" badge on Fincept-enriched markets
+   - **Signal feed**: scrollable list of recent signals with direction arrow, confidence %, timestamp
+   - **News ticker**: horizontal scrolling news bar with Fincept headlines at the bottom
+   - Auto-refresh every 30 seconds via `setInterval` + fetch
+5. **Configuration** (`config/fincept.yaml`): list of macro indicators to monitor, news topics to track (map each to Polymarket category), sector sentiments to pull; load with PyYAML
+6. **Claude prompt upgrade**: update the Claude analysis prompt in the existing agent to include Fincept context: prepend top 3 news headlines and current VIX/macro snapshot to the market analysis prompt; this gives Claude richer context for qualitative assessment
+7. **Alerting**: add a Telegram alert (reuse existing telegram pattern if present) when: a new high-confidence signal (>80%) is generated, a position hits its price target, or VIX spikes >20% in 24h; read `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from env
+8. **Update requirements.txt**: add `fastapi`, `uvicorn`, `pyyaml`, `httpx`, `aiosqlite` (for async SQLite cache); ensure `anthropic>=0.40.0` already present
+9. **Startup script** (`run_dashboard.sh`): runs `uvicorn dashboard.app:app --host 0.0.0.0 --port 8080` alongside the existing trading bot main loop; document in README
+10. **Update README**: add Fincept setup section (API key, config/fincept.yaml), dashboard access instructions (localhost:8080), new env vars (`FINCEPT_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)
 
-## Improvements To Make
-1. **Upgrade Claude model to claude-sonnet-4-6** — Find all places in the codebase where a Claude model is specified (search for "claude-" strings). Update ALL of them to use `claude-sonnet-4-6`. Do not leave any older model strings.
-2. **Add Fincept Terminal data integration** — Fincept Terminal provides financial/economic data. Add a new module `agents/fincept_feed.py` that fetches relevant market intelligence. Use the Fincept Terminal API (docs: https://fincept.share.zrok.io/docs or check for a Python SDK). Feed this data as additional context to the prediction agents before they make decisions. If Fincept API is unavailable, fall back gracefully with a log warning.
-3. **Improve prediction accuracy** — Add a confidence calibration layer: after each agent makes a prediction, have a second Claude call review the prediction and assign a calibrated confidence score (0-100). Only execute trades where calibrated confidence >= 70. Log raw vs calibrated confidence for analysis.
-4. **Add daily P&L reporting** — Create `scripts/daily_report.py` that: queries the SQLite DB for all trades in the last 24 hours, calculates total P&L (realized + unrealized), outputs a formatted rich terminal report with: total trades, win rate, best trade, worst trade, net P&L, and current open positions. Schedule this to run at midnight via the existing `schedule` library. Also save reports to `reports/YYYY-MM-DD.json`.
-5. **Add risk controls — max loss per day** — Add a daily loss limit to config. Default: $50/day max loss. In the main trading loop, before every trade: check today's realized P&L from SQLite. If total losses exceed the limit, skip all trades for the rest of the day and log "DAILY LOSS LIMIT REACHED — trading paused". Reset at midnight.
-6. **Add position size limits** — Cap any single trade at 5% of total bankroll. Read bankroll from config or calculate from wallet balance. Reject trades that would exceed this cap and log a warning.
-7. **Improve logging** — Replace any print() statements with proper Python logging (use `rich` logger or standard `logging` module with file handler). Log to both console and `logs/trading-YYYY-MM-DD.log`. Include timestamps on every log line.
+## Tech Stack
+- Python 3.10+ (existing)
+- Fincept Terminal API (FINCEPT_API_KEY)
+- FastAPI + uvicorn (web dashboard)
+- SQLite (aiosqlite for async cache)
+- Anthropic SDK claude-sonnet-4-6 (existing — already used in bot)
+- PyYAML for config
+- Existing: py-clob-client, rich, schedule, pandas, numpy
 
-## Do Not Touch
-- agents/ directory structure (extend, don't restructure)
-- config/ directory (add new keys, don't rename existing ones)
-- run.sh and startup.sh scripts
+## Deploy Target
+Coolify (backend Python service — FastAPI dashboard on port 8080, trading bot as a long-lived process). Never Vercel.
 
-## Definition of Done
-- [ ] All improvements implemented and working
-- [ ] Claude model updated to claude-sonnet-4-6 everywhere
-- [ ] Daily P&L report generates without errors
-- [ ] Risk controls prevent trading when daily loss limit hit
-- [ ] No Python errors on `python main.py --dry-run` (add dry-run flag if missing)
-- [ ] Pushed to main with "replit: " commit prefix
+## Done When
+- [ ] `fincept_client.py` connects to Fincept API and all 4 methods return data (or graceful mock if API unavailable)
+- [ ] Market scoring includes Fincept news sentiment and macro risk as weighted signals
+- [ ] FastAPI dashboard starts with `uvicorn dashboard.app:app --port 8080`
+- [ ] Dashboard `/api/markets`, `/api/positions`, `/api/signals`, `/api/news` all return JSON
+- [ ] `dashboard/templates/index.html` auto-refreshes every 30s and shows all 4 data sections
+- [ ] Claude prompt includes Fincept news headlines and VIX snapshot
+- [ ] Telegram alerts fire on high-confidence signals (>80%)
+- [ ] `config/fincept.yaml` documents monitored indicators and news topics
+- [ ] `requirements.txt` updated with all new dependencies
+- [ ] README documents Fincept setup, dashboard URL, and all new env vars
